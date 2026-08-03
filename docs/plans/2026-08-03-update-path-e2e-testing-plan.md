@@ -89,21 +89,48 @@ runs `--root` and Tier A covers the user-level layout.
 
 ## Two tiers of test
 
-**Tier A — git-level, no container.** Point the installer's two hardcoded repo
-URLs at a local bare repo via a *multi-valued* `url.<file://…>.insteadOf`
-rewrite, then run the real update code. Verified working: a `--depth 1` clone
-followed by `hermes update`'s scoped `git fetch origin main` fast-forwards
-correctly, with `GIT_SSH_COMMAND=false` proving nothing touches the network.
-Fast, unprivileged, runs on any runner. This is where the "does HEAD move"
-contract belongs.
+**One harness, not two.** `scripts/dev-sandbox.sh` is the harness. It already
+runs the true `curl … | install.sh` one-liner over a MITM proxy at the canonical
+URL, clones "github.com" through a `git-upload-pack` shim (exercising the
+ssh-first-then-https fallback), writes nothing outside `SANDBOX_ROOT`, and
+implements the install-main-then-update state machine via `--from-main`.
 
-**Tier B — full dev-sandbox.** Real `curl … | bash` through the sandbox's MITM
-proxy, real ssh shim, real FHS install, no host writes. Highest fidelity.
-Needs `bubblewrap` + `slirp4netns` on the runner and probably
-`kernel.apparmor_restrict_unprivileged_userns=0` on ubuntu-24.04.
+An earlier draft of this work built a second, sandbox-free harness that rewrote
+the installer's hardcoded URLs with `url.<file://…>.insteadOf` and ran
+`install.sh` directly against the host. It was deleted. It was strictly worse on
+the axis that matters — it invoked `bash install.sh` instead of the real
+one-liner, needed `GIT_SSH_COMMAND=false` to stop a failed rewrite reaching real
+GitHub, and installed toolchains against the *host's* libraries, so it validated
+NixOS glibc locally and Ubuntu's on CI rather than a clean machine. Maintaining
+a second fake Internet to test the installer less faithfully is a bad trade; the
+recurring "add another binary to the allowlist PATH" churn was the symptom.
 
-Order: Tier A first (mergeable, no CI privilege questions), Tier B once bwrap
-is proven to survive on a GitHub runner.
+The remaining tiering is about *where it runs*, not *how*:
+
+- **Local / Nix** — `HERMES_RUN_INSTALL_E2E=1 scripts/run_tests.sh tests/install/`.
+  Uses the `sandbox` wrapper from the devShell.
+- **CI** — needs `bubblewrap` + `slirp4netns` + `util-linux` installed and
+  unprivileged userns permitted. Unverified; see Open items.
+
+## Test layout
+
+`tests/install/` — a sibling of the existing opt-out suites, registered in
+`_SKIP_PARTS` in `scripts/run_tests_parallel.py` alongside `integration`, `e2e`,
+and `docker`. That machinery already does exactly what this suite needs: absent
+from default discovery (a run installs real toolchains over the network and
+takes minutes) while still runnable by naming the path explicitly.
+
+Two further gates, because being merely excluded is not enough:
+
+- `HERMES_RUN_INSTALL_E2E=1` is required, so an explicit
+  `scripts/run_tests.sh tests/install/` on a developer machine skips rather
+  than silently burning ten minutes. It is threaded through `run_tests.sh`'s
+  `env -i` allowlist (that script scrubs the environment for CI parity, so an
+  unlisted var never reaches pytest — the reason the first attempt skipped).
+- The sandbox must actually be usable. The probe prefers the `sandbox` wrapper
+  and only falls back to the raw script when `bwrap` is on PATH; under Nix the
+  script alone exits 127 because the wrapper is what supplies the PATH and the
+  `DEV_SANDBOX_*` variables.
 
 ## Known traps
 
@@ -128,11 +155,14 @@ is proven to survive on a GitHub runner.
 
 ## Open items
 
-- **Tier B on a GitHub runner.** Needs `bubblewrap` + `slirp4netns` +
-  `util-linux`, and likely
-  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on
-  ubuntu-24.04. Also needs a `/etc/subuid` range for the runner user if it uses
-  the default user-level mode. Unverified — check before committing to Tier B.
+- **Does bwrap work on a GitHub runner?** The gating unknown. Needs
+  `bubblewrap` + `slirp4netns` + `util-linux` and unprivileged user namespaces;
+  ubuntu-24.04 restricts those via AppArmor by default, so the job may need
+  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The
+  user-level default additionally wants an `/etc/subuid` range for the runner
+  user — if runners lack one, the CI job can pass `--root` (the script errors
+  with the exact line to add either way). Settle this with a throwaway
+  workflow before building the real job around it.
 - **Routes 3–7.** Deferred (see table). Route 3 is the highest-value next one,
   since the desktop button is how most non-terminal users update; it shells the
   same `hermes update`, so route 2's coverage carries most of the risk.

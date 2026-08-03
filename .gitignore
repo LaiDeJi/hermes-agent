@@ -145,6 +145,8 @@ docs/superpowers/*
 
 # Persistent dev sandbox dir (scripts/dev-sandbox.sh --persistent)
 .hermes-sandbox/
+# Sandbox dir used by the install/update E2E (tests/install/)
+.hermes-sandbox-e2e/
 
 # Interrupted-update breadcrumb + recovery lock written next to the shared venv
 # by `hermes update` / launch-time self-heal. Runtime state, never a code change

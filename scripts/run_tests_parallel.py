@@ -70,7 +70,12 @@ _DEFAULT_ROOTS = ["tests"]
 #                        ``docker build``,
 #                        so the build is guaranteed to die in fixture
 #                        setup. The dedicated job sidesteps both costs.
-_SKIP_PARTS = {"integration", "e2e", "docker"}
+#   tests/install/     — .github/workflows/install-e2e.yml. Shell, not
+#                        pytest: runs the real scripts/install.sh (which
+#                        installs uv, a managed Python, and Node) and then
+#                        the real update routes, so a single run takes
+#                        minutes and mutates a throwaway HOME.
+_SKIP_PARTS = {"integration", "e2e", "docker", "install"}
 
 # Per-file wall-clock cap. Override
 # via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
