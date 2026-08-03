@@ -308,6 +308,11 @@ def test_installer_rerun_reaches_this_commit(installed_base: str) -> None:
     # main at this checkout, which is what the re-run must land on.
     _install(from_main=False, what="installer re-run")
 
+    # Read the target AFTER the install, never before: each dev-sandbox
+    # invocation re-derives fake main from the worktree, so a target captured
+    # earlier can be stale by the time the re-run finishes (it is a fresh
+    # snapshot commit whenever the tree is dirty). Comparing HEAD against the
+    # remote's CURRENT main is the invariant that actually holds.
     out = _sandbox_shell(
         f"""
 set -euo pipefail
@@ -315,6 +320,7 @@ cd {SANDBOX_INSTALL_DIR}
 target=$(git --git-dir={FAKE_REMOTE_GIT_DIR} rev-parse main)
 after=$(git rev-parse HEAD)
 echo "after=$after"
+echo "target=$target"
 [ "$after" = "$target" ] || {{ echo "re-run left HEAD at $after, wanted $target"; exit 1; }}
 echo '--- hermes --version (after installer re-run)'
 hermes --version

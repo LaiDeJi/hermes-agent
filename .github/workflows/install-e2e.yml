@@ -1,0 +1,113 @@
+name: Install & Update E2E
+
+# Proves a user on main can reach this commit by every update route we support
+# on Linux. See docs/plans/2026-08-03-update-path-e2e-testing-plan.md.
+#
+# Not part of the ci.yml fan-out yet: it depends on unprivileged user
+# namespaces working on a GitHub runner, which is unverified. Keep it
+# manually/branch-triggered until a few green runs prove it, then wire it into
+# ci.yml behind the python_prod lane.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ethie/sandbox-2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-e2e:
+    name: Real install + update (Linux, user-level)
+    runs-on: ubuntu-latest
+    # A cold run installs uv, a managed CPython, and Node from the network,
+    # twice (install, then update). Bounded so a wedged sandbox can't idle.
+    timeout-minutes: 60
+
+    steps:
+      # Full history: the sandbox's --from-main needs to fetch real upstream
+      # main, and the test compares against this commit, so a shallow clone
+      # with no merge base is not enough.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      # bubblewrap + slirp4netns are what the sandbox is built on; util-linux
+      # supplies the `unshare` that builds the multi-uid userns for the
+      # user-level (non-root) install.
+      - name: Install sandbox dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap slirp4netns uidmap util-linux
+
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+      # which is exactly what bwrap needs. Report the state before touching it
+      # so a future runner-image change is visible in the log rather than
+      # silently altering what this job proves.
+      - name: Permit unprivileged user namespaces
+        run: |
+          set -euo pipefail
+          echo "--- kernel userns settings (before)"
+          sysctl kernel.unprivileged_userns_clone 2>/dev/null || echo "  (sysctl absent)"
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "  (sysctl absent)"
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          echo "--- subuid/subgid for $(id -un)"
+          grep "^$(id -un):" /etc/subuid /etc/subgid || echo "  (none — sandbox will say so)"
+
+      # Fail fast with a clear signal if the runner cannot host bwrap at all,
+      # rather than burying it in a 40-minute install failure.
+      - name: Verify the sandbox can start
+        run: |
+          set -euo pipefail
+          scripts/dev-sandbox.sh bash -c 'echo "sandbox ok as uid $(id -u)"'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: '0.9.28'
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      # The suite itself only needs pytest; the heavy dependency install
+      # happens INSIDE the sandbox, by the real installer under test.
+      - name: Install test dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra dev
+
+      - name: Run install + update E2E
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          python -m pytest tests/install/ -v -rs --no-header --tb=short
+        env:
+          HERMES_RUN_INSTALL_E2E: '1'
+          # No real credentials: the installer must not need any, and a leak
+          # here would let a test spend money.
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      # The sandbox keeps the installer's own logs; they say far more than
+      # pytest's assertion when a real install breaks.
+      - name: Upload sandbox logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-e2e-logs-${{ github.sha }}
+          path: .hermes-sandbox-e2e/root/logs
+          retention-days: 14
+          if-no-files-found: ignore
